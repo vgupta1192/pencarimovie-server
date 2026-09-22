@@ -1,4 +1,7 @@
-# Auto detect text files and perform LF normalization
-* text=auto
-*.sh text eol=lf
-*.patch text eol=lf
+# Caddyfile carries the local self-host patch (admin on localhost:2038
+# instead of upstream's Render/PaaS-oriented "admin off", 127.0.0.1 binds).
+# Upstream edits this file constantly, which conflict-merged every update
+# (confirmed live 2026-09-22: merge from upstream aborted on Caddyfile).
+# merge=ours keeps the local version on every future merge; upstream
+# Caddyfile changes are deliberately shadowed.
+Caddyfile merge=ours
