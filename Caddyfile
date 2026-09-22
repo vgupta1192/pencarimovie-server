@@ -1,7 +1,6 @@
 {
 	admin localhost:2038
 	auto_https off
-	bind 127.0.0.1
 	frankenphp {
 		# Concurrency & thread pool (tuned for low-end VPS / devices: 1GB-2GB RAM, 1-2 vCPUs):
 		#   - Starts with 8 worker threads, scaling up to 16 threads under load.
@@ -50,6 +49,7 @@
 # Changing this to `localhost:8088` would silently enable auto-HTTPS and
 # redirect HTTP -> HTTPS, breaking every LAN client.
 :{$PORT:8088} {
+	bind 127.0.0.1
 	root * .
 	encode zstd gzip
 
