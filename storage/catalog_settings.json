@@ -1,6 +1,6 @@
 {
-    "catalogs_enabled": true,
-    "country": "MY",
+    "catalogs_enabled": false,
+    "country": "IN",
     "enabled_types": {
         "movie": true,
         "series": true,
@@ -42,8 +42,8 @@
             "4k": true,
             "1080p": true,
             "720p": true,
-            "sd": true,
-            "unknown": true
+            "sd": false,
+            "unknown": false
         },
         "qualities": {
             "remux": true,
@@ -65,7 +65,7 @@
         },
         "preferred_resolution": "auto",
         "max_streams_per_resolution": 0,
-        "max_streams_total": 0,
+        "max_streams_total": 20,
         "min_size_mb": 0,
         "max_size_gb": 0,
         "exclude_cam": false,
