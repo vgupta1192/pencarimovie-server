@@ -6,13 +6,13 @@ name: Release Builder & Docker Publish
 # `v*` tag could publish a release that shadows /releases/latest.
 #
 # To cut a release: Actions -> "Release Builder & Docker Publish" -> Run
-# workflow, and supply the tag (e.g. v2.3.4). Leave the tag empty to build
+# workflow, and supply the tag (e.g. v2.4.7). Leave the tag empty to build
 # and publish the Docker image only, without creating a GitHub release.
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v2.3.4). Leave empty to build the Docker image only."
+        description: "Release tag (e.g. v2.4.7). Leave empty to build the Docker image only."
         required: false
         default: ""
 
@@ -151,10 +151,17 @@ jobs:
           # Package standalone universal server (pencarimovie-server.tar.gz)
           mkdir -p dist/.build-tmp/pencarimovie-server
           cp -r public backend.php index.php router.php Caddyfile install.sh install-termux.sh start.sh start-termux.sh restart.sh restart-termux.sh stop.sh pencarimovie-linux.sh pencarimovie-termux.sh pencarimovie-docker.sh package.json README.md LICENSE SECURITY.md dist/.build-tmp/pencarimovie-server/ 2>/dev/null || true
+          # NOTE: composer.phar / composer-setup.php are intentionally NOT shipped.
+          # install.sh falls back to a global `composer` when vendor/ is absent.
           mkdir -p dist/.build-tmp/pencarimovie-server/bin dist/.build-tmp/pencarimovie-server/storage
           cp bin/php.ini.unix dist/.build-tmp/pencarimovie-server/bin/php.ini 2>/dev/null || true
           cp bin/php dist/.build-tmp/pencarimovie-server/bin/php 2>/dev/null || true
-          cp storage/.gitkeep storage/config.example.json storage/catalog_settings.json dist/.build-tmp/pencarimovie-server/storage/ 2>/dev/null || true
+          # NOTE: storage/catalog_settings.json is intentionally NOT shipped.
+          # It is per-user state (enabled catalogs, upstream manifests, stream
+          # filters). Shipping the developer's copy would override the built-in
+          # defaults in fd_load_catalog_settings() — including the default
+          # AIOMetadata upstream manifest — on every fresh install.
+          cp storage/.gitkeep storage/config.example.json dist/.build-tmp/pencarimovie-server/storage/ 2>/dev/null || true
 
           # Bundle vendor, patches and release tag
           if [ -d "vendor" ]; then cp -r vendor dist/.build-tmp/pencarimovie-server/; fi
@@ -205,3 +212,47 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
+
+      - name: Display Next Version and Release Summary
+        if: always()
+        env:
+          TAG: ${{ env.TAG || 'latest' }}
+          PUBLISHED: ${{ steps.vars.outputs.publish || 'false' }}
+        run: |
+          set -euo pipefail
+
+          php -r '
+            $tag = getenv("TAG");
+            $published = getenv("PUBLISHED") === "true";
+
+            $next = "v1.0.0";
+            if (preg_match("/^v?(\d+)\.(\d+)\.(\d+)/", $tag, $m)) {
+                $major = $m[1];
+                $minor = $m[2];
+                $patch = (int)$m[3] + 1;
+                $next = "v{$major}.{$minor}.{$patch}";
+            } else {
+                // Fetch highest git tag if current run was docker-only
+                $output = shell_exec("git tag -l \"v*\" --sort=-v:refname | head -n 1");
+                $latestTag = trim($output ?: "");
+                if (preg_match("/^v?(\d+)\.(\d+)\.(\d+)/", $latestTag, $m)) {
+                    $next = "v{$m[1]}.{$m[2]}." . ((int)$m[3] + 1);
+                }
+            }
+
+            echo "::notice title=Next Recommended Release Tag::Next release version to use: " . $next . "\n";
+
+            $summary = "# 🚀 Release Build & Docker Publish Summary\n\n";
+            if ($published) {
+                $summary .= "- **Published Release Tag**: \`" . $tag . "\`\n";
+                $summary .= "- **Next Version To Use**: \`" . $next . "\` 🎉\n";
+                $summary .= "- **Docker Image**: \`ghcr.io/" . getenv("GITHUB_REPOSITORY") . ":" . $tag . "\`\n\n";
+                $summary .= "> 💡 **Next time you run this workflow, supply \`" . $next . "\` in the tag input.**\n";
+            } else {
+                $summary .= "- **Docker Image**: \`ghcr.io/" . getenv("GITHUB_REPOSITORY") . ":latest\`\n";
+                $summary .= "- **Next Version To Use (when cutting a release)**: \`" . $next . "\`\n\n";
+                $summary .= "> ℹ️ *No release tag was provided; built and published Docker image only.*\n";
+            }
+
+            file_put_contents(getenv("GITHUB_STEP_SUMMARY"), $summary, FILE_APPEND);
+          '

@@ -1,5 +1,8 @@
 {
-	admin localhost:2038
+	# Production/PaaS (Render, Docker, VPS): the admin API on :2019 is unused
+	# and Caddy rejects Host headers other than localhost, which makes Render's
+	# internal HEAD / health check log `host not allowed: *.onrender.com` 403.
+	admin off
 	auto_https off
 	frankenphp {
 		# Concurrency & thread pool (tuned for low-end VPS / devices: 1GB-2GB RAM, 1-2 vCPUs):
@@ -49,7 +52,6 @@
 # Changing this to `localhost:8088` would silently enable auto-HTTPS and
 # redirect HTTP -> HTTPS, breaking every LAN client.
 :{$PORT:8088} {
-	bind 127.0.0.1
 	root * .
 	encode zstd gzip
 
@@ -82,5 +84,11 @@
 	php_server {
 		resolve_root_symlink false
 		try_files {path} index.php
+		# NOTE: do NOT add `request_body_timeout` here. This FrankenPHP build's
+		# php_server only accepts: hot_reload, name, root, split, env,
+		# resolve_root_symlink, worker. Adding it fails config adaptation with
+		# `unknown "php or php_server" subdirective: request_body_timeout` and
+		# the server never starts. The request-body idle cutoff is already set
+		# globally via `servers { timeouts { read_body 10m } }` above.
 	}
 }

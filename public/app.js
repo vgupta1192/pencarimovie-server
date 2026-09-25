@@ -541,6 +541,7 @@ class PencariMovieApp {
     const upstreamAddonInput = this.$('#upstreamAddonInput');
     const upstreamAddonAddBtn = this.$('#upstreamAddonAddBtn');
     const upstreamAddonStatus = this.$('#upstreamAddonStatus');
+    const upstreamEnabledToggle = this.$('#upstreamEnabledToggle');
 
     const renderUpstreamAddons = () => {
       if (!upstreamAddonsList) return;
@@ -641,6 +642,28 @@ class PencariMovieApp {
       });
     }
 
+    // Master upstream toggle: one switch disables every bridged upstream
+    // catalog/stream/subtitle. The configured list is kept so re-enabling
+    // restores it without re-adding URLs.
+    const updateUpstreamEnabledUI = () => {
+      const on = catalogSettingsState.upstream_enabled !== false;
+      if (upstreamEnabledToggle) upstreamEnabledToggle.checked = on;
+      if (upstreamAddonsList) {
+        upstreamAddonsList.style.opacity = on ? '1' : '0.45';
+        upstreamAddonsList.style.pointerEvents = on ? 'auto' : 'none';
+      }
+      if (upstreamAddonInput) upstreamAddonInput.disabled = !on;
+      if (upstreamAddonAddBtn) upstreamAddonAddBtn.disabled = !on;
+    };
+
+    if (upstreamEnabledToggle) {
+      upstreamEnabledToggle.addEventListener('change', () => {
+        catalogSettingsState.upstream_enabled = upstreamEnabledToggle.checked;
+        updateUpstreamEnabledUI();
+        updateCatalogModeUI();
+      });
+    }
+
     const updateCatalogModeUI = () => {
       const isEnabled = catalogSettingsState.catalogs_enabled;
       if (catalogModeEnabled) catalogModeEnabled.checked = isEnabled;
@@ -722,6 +745,8 @@ class PencariMovieApp {
         if (res?.ok) {
           catalogSettingsState = res.settings || catalogSettingsState;
           catalogOptionsState = res.catalog_options || catalogOptionsState;
+
+          updateUpstreamEnabledUI();
 
           if (catTypeMovies) {
             catTypeMovies.checked = catalogSettingsState.enabled_types?.movie !== false;
@@ -915,7 +940,14 @@ class PencariMovieApp {
               other: !!(catTypeOther && catTypeOther.checked)
             },
             enabled_catalogs: catalogSettingsState.enabled_catalogs,
-            upstream_manifests: catalogSettingsState.upstream_manifests || [],
+            upstream_enabled: catalogSettingsState.upstream_enabled !== false,
+            // When upstreams are disabled, omit the list entirely so the
+            // backend keeps the stored manifests (re-enabling restores them
+            // without re-adding every URL).
+            upstream_manifests:
+              catalogSettingsState.upstream_enabled === false
+                ? undefined
+                : catalogSettingsState.upstream_manifests || [],
             stream_config: {
               resolutions: {
                 '4k': res4kEl ? res4kEl.checked : true,
@@ -4121,15 +4153,21 @@ class PencariMovieApp {
       // If manifest is available, align app categories and rows with manifest.catalogs
       if (this.manifest) {
         const rawCatalogs = Array.isArray(this.manifest.catalogs) ? this.manifest.catalogs : [];
-        if (rawCatalogs.length === 0) {
-          // Catalogs disabled in manifest
+        // Upstream-bridged catalogs (id starts with `up_`) are for Stremio/Nuvio
+        // only — they are NOT local PencariMovie rows. Exclude them so the
+        // dashboard does not try to fetch 146 non-existent WordPress categories
+        // (which made the homepage spin forever when local catalogs were off
+        // but upstream was on).
+        const localCatalogs = rawCatalogs.filter((cat) => !String(cat.id || '').startsWith('up_'));
+        if (localCatalogs.length === 0) {
+          // No local catalogs enabled (upstream-only or fully disabled)
           this.categories = [];
         } else {
           // Build category list from enabled manifest catalogs (excluding search/telegram files)
           const derivedCategories = [];
           const seenSlugs = new Set();
 
-          rawCatalogs.forEach((cat) => {
+          localCatalogs.forEach((cat) => {
             const id = cat.id || '';
             // Skip search, special, and telegram-only catalogs from category rows
             if (id === 'pm_search_movie' || id === 'pm_search_series' || id === 'pm_search_files') {
@@ -4247,10 +4285,11 @@ class PencariMovieApp {
         heroPosts = this.trending;
       }
 
-      // Check if hero should be shown based on enabled catalogs
+      // Check if hero should be shown based on enabled LOCAL catalogs.
+      // Upstream-only manifests have no local rows, so the hero must hide.
       const heroSection = this.$('#streamHero');
       if (heroSection) {
-        if (this.categories.length === 0 && (!this.manifest || !Array.isArray(this.manifest.catalogs) || this.manifest.catalogs.length === 0)) {
+        if (this.categories.length === 0) {
           heroSection.classList.add('hidden');
         } else {
           heroSection.classList.remove('hidden');
@@ -4275,6 +4314,18 @@ class PencariMovieApp {
   renderNavLinks() {
     const container = this.$('#streamNavLinks');
     if (!container) return;
+
+    // When catalogs are disabled there are no local categories to link to.
+    // Do NOT fall back to the hardcoded genre list — those links would open
+    // empty category pages. Clear the nav instead.
+    const manifestCatalogs = (this.manifest && Array.isArray(this.manifest.catalogs)) ? this.manifest.catalogs : [];
+    const hasLocalCatalogs = manifestCatalogs.some((cat) => !String(cat.id || '').startsWith('up_'));
+    if (this.categories.length === 0 && !hasLocalCatalogs) {
+      container.innerHTML = '';
+      const mobileEmpty = this.$('#mobileNavLinks');
+      if (mobileEmpty) mobileEmpty.innerHTML = '';
+      return;
+    }
 
     const categories = this.categories.length > 0 ? this.categories : [
       { name: 'Animation', slug: 'animation' },
@@ -4500,6 +4551,20 @@ class PencariMovieApp {
     const container = this.$('#trendingPills');
     if (!container) return;
 
+    // Hide the trending pills when catalogs are disabled — they are a
+    // catalog-browsing affordance and would otherwise still show on an
+    // otherwise-empty homepage.
+    const manifestCatalogs = (this.manifest && Array.isArray(this.manifest.catalogs)) ? this.manifest.catalogs : [];
+    const hasLocalCatalogs = manifestCatalogs.some((cat) => !String(cat.id || '').startsWith('up_'));
+    if (this.categories.length === 0 && !hasLocalCatalogs) {
+      container.innerHTML = '';
+      const trendingSection = this.$('#streamTrending');
+      if (trendingSection) trendingSection.classList.add('hidden');
+      return;
+    }
+    const trendingSection = this.$('#streamTrending');
+    if (trendingSection) trendingSection.classList.remove('hidden');
+
     if (!this.trending || this.trending.length === 0) {
       container.innerHTML = '';
       return;
@@ -4529,14 +4594,23 @@ class PencariMovieApp {
 
     container.innerHTML = '';
 
-    // If catalogs are disabled in manifest and no categories exist, show minimal informative placeholder
-    if (this.manifest && Array.isArray(this.manifest.catalogs) && this.manifest.catalogs.length === 0) {
+    // Show the placeholder when there are NO local PencariMovie catalogs to
+    // render. Upstream-bridged catalogs (`up_*`) do not count — they are for
+    // Stremio/Nuvio only, so an upstream-only manifest must still show this
+    // message instead of spinning forever trying to fetch non-existent
+    // WordPress categories.
+    const manifestCatalogs = (this.manifest && Array.isArray(this.manifest.catalogs)) ? this.manifest.catalogs : [];
+    const hasLocalCatalogs = manifestCatalogs.some((cat) => !String(cat.id || '').startsWith('up_'));
+    if (this.manifest && !hasLocalCatalogs) {
+      const upstreamOnly = manifestCatalogs.length > 0;
       container.innerHTML = `
         <div style="padding: 40px 20px; text-align: center; color: rgba(255,255,255,0.6);">
           <div style="font-size: 2rem; margin-bottom: 12px;">⚡</div>
           <h3 style="color: #fff; margin-bottom: 8px;">Catalogs are currently disabled</h3>
           <p style="max-width: 480px; margin: 0 auto; font-size: 0.88rem; line-height: 1.5;">
-            Addon is configured for streams only via Streams matched by ID (IMDb, TMDB, Kitsu, and more). You can search files or enable catalogs in Addon Settings.
+            ${upstreamOnly
+              ? 'PencariMovie catalogs are off. Upstream addon catalogs are still bridged for Stremio/Nuvio, but they are not shown here. Enable PencariMovie catalogs in Addon Settings to browse them on this page.'
+              : 'Addon is configured for streams only via Streams matched by ID (IMDb, TMDB, Kitsu, and more). You can search files or enable catalogs in Addon Settings.'}
           </p>
         </div>
       `;
