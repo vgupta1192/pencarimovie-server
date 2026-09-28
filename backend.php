@@ -6587,9 +6587,16 @@ function fd_fetch_episode_stream_files(int $postId, int $season, int $episode, i
         if (isset($postMemoryCache[$postId])) {
             $post = $postMemoryCache[$postId];
         } else {
-            $postData = fd_fetch_stream_ajax('get_post', ['post_id' => $postId]);
-            $post = !empty($postData) && is_array($postData) ? ($postData[0] ?? $postData) : [];
-            if (!empty($post)) {
+            // Query media_ids_idx by post_id
+            $localMeta = fd_lookup_local_catalog_by_prefix('post', (string) $postId);
+            if (empty($localMeta['title'])) {
+                $localMeta = fd_lookup_local_catalog_by_prefix('pm', (string) $postId);
+            }
+            $post = [
+                'title' => (string) ($localMeta['title'] ?? ''),
+                'year'  => (string) ($localMeta['year'] ?? ''),
+            ];
+            if (!empty($post['title'])) {
                 $postMemoryCache[$postId] = $post;
             }
         }
@@ -12310,18 +12317,22 @@ if ($isNuvioRoute) {
             }
             // Fast Path 2: Movie requested via post ID
             elseif ($itemType === 'movie') {
-                $postData = fd_fetch_stream_ajax('get_post', ['post_id' => $postId]);
-                $post = !empty($postData) && is_array($postData) ? ($postData[0] ?? $postData) : [];
-                $postTitle = $post['title'] ?? '';
+                $postTitle = '';
                 $postYear = '';
-                if (preg_match('/\b(19\d\d|20\d\d)\b/', $postTitle, $ym)) {
-                    $postYear = $ym[1];
+                // Query media_ids_idx by post_id
+                $localMeta = fd_lookup_local_catalog_by_prefix('post', (string) $postId);
+                if (empty($localMeta['title'])) {
+                    $localMeta = fd_lookup_local_catalog_by_prefix('pm', (string) $postId);
+                }
+                if (!empty($localMeta['title'])) {
+                    $postTitle = (string) $localMeta['title'];
+                    $postYear = (string) ($localMeta['year'] ?? '');
                 }
                 $searchedTitle = $postTitle;
                 $searchedYear = $postYear;
 
-                $mUrl = FD_WP_API_BASE . "/stream-files?post_id={$postId}&type=movie&limit=60";
-                $res = fd_http_json($mUrl, [], 'GET', 10);
+                $mUrl = FD_WP_API_BASE . "/stream-files?post_id={$postId}&type=movie" . ($postTitle !== '' ? '&title=' . urlencode($postTitle) : '') . ($postYear !== '' ? '&year=' . urlencode($postYear) : '') . "&limit=60";
+                $res = fd_http_json($mUrl, [], 'GET', 15);
                 $moviePostFastPathDone = false;
                 if (isset($res['ok'])) {
                     $moviePostFastPathDone = true;
@@ -12339,12 +12350,6 @@ if ($isNuvioRoute) {
             }
 
             if (!$moviePostFastPathDone && empty($filesToStream)) {
-                if (empty($postData)) {
-                    $postData = fd_fetch_stream_ajax('get_post', ['post_id' => $postId]);
-                    $post = !empty($postData) && is_array($postData) ? ($postData[0] ?? $postData) : [];
-                    $postTitle = $post['title'] ?? '';
-                }
-
                 $postFiles = fd_fetch_post_files_paged($postId, [
                     'page_size' => 50,
                     'max_files' => 80,
@@ -13183,11 +13188,14 @@ if ($isNuvioRoute) {
             ? (array) ($catSettings['upstream_manifests'] ?? [])
             : [];
         $upstreamUrls = [];
-        foreach ($configuredUpstreams as $idx => $upstream) {
-            $manifestUrl = trim((string)($upstream['url'] ?? ''));
-            if ($manifestUrl === '') continue;
-            $baseAddonUrl = preg_replace('#/manifest\.json(\?.*)?$#i', '', $manifestUrl);
-            $upstreamUrls['up_' . $idx] = rtrim($baseAddonUrl, '/') . "/stream/{$itemType}/" . urlencode($itemId) . ".json";
+        $isLocalPmId = str_starts_with($itemId, 'pm:') || str_starts_with($itemId, 'pm_');
+        if (!$isLocalPmId) {
+            foreach ($configuredUpstreams as $idx => $upstream) {
+                $manifestUrl = trim((string)($upstream['url'] ?? ''));
+                if ($manifestUrl === '') continue;
+                $baseAddonUrl = preg_replace('#/manifest\.json(\?.*)?$#i', '', $manifestUrl);
+                $upstreamUrls['up_' . $idx] = rtrim($baseAddonUrl, '/') . "/stream/{$itemType}/" . urlencode($itemId) . ".json";
+            }
         }
 
         if (!empty($upstreamUrls)) {
