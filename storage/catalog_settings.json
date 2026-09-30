@@ -36,10 +36,10 @@
         "pm_series_english": true,
         "pm_series_indo": true
     },
-    "upstream_enabled": true,
+    "upstream_enabled": false,
     "upstream_manifests": [
         {
-            "url": "https:\/\/aiometadata.elfhosted.com\/stremio\/136f7ae5-2f15-471d-8f3f-79ee335bbd24\/manifest.json",
+            "url": "https://aiometadata.elfhosted.com/stremio/136f7ae5-2f15-471d-8f3f-79ee335bbd24/manifest.json",
             "name": "AIOMetadata"
         }
     ],
@@ -74,7 +74,7 @@
         "max_streams_total": 20,
         "min_size_mb": 0,
         "max_size_gb": 0,
-        "exclude_cam": false,
+        "exclude_cam": true,
         "exclude_unplayable": true,
         "excluded_keywords": "",
         "required_keywords": ""
