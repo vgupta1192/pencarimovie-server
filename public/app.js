@@ -13,7 +13,6 @@ class PencariMovieApp {
     // ── Config ──
     this.localApiBase = window.location.origin;
     this.wpApiBase = 'https://pencarimovie.com/wp-json/pencarimovie-server/v1';
-    this.wpAjaxUrl = 'https://pencarimovie.com/wp-admin/admin-ajax.php';
     this.siteName = 'PencariMovie';
 
     // ── State ──
@@ -91,6 +90,7 @@ class PencariMovieApp {
 
     // ── Auth gate — must pass before anything else loads ──
     if (!(await this.checkAuth())) {
+      this._hideLoadingScreen();
       return; // Auth gate is showing; stop init until the user logs in
     }
 
@@ -99,6 +99,8 @@ class PencariMovieApp {
 
   async continueInit() {
     this.loadLanIp();
+    // Pre-load and initialize catalog configuration settings
+    this.loadCatalogSettings?.();
 
     // ── Instant Modal Opening if requested by hash (zero waiting) ──
     const initHash = window.location.hash;
@@ -1187,7 +1189,7 @@ class PencariMovieApp {
       }
 
       if (manifestLanInput) {
-        manifestLanInput.value = lanUrl || (this.lanIp ? `http://${this.lanIp}${portSuffix}${tokenPrefix}/manifest.json` : '');
+        manifestLanInput.value = lanUrl || '';
       }
 
       if (manifestTunnelInput) {
@@ -1281,6 +1283,9 @@ class PencariMovieApp {
       }
     };
     this.openAddonModal = openAddonModal;
+    this.loadCatalogSettings = loadCatalogSettings;
+    // Load catalog settings and server country during initial setup
+    loadCatalogSettings();
 
     if (addonBtn) {
       addonBtn.addEventListener('click', openAddonModal);
@@ -1712,10 +1717,13 @@ class PencariMovieApp {
       if (port > 0 && port < 65536) {
         this.listenPort = port;
       }
-      if (lanIp && lanIp !== '127.0.0.1') {
-        this.lanIp = lanIp;
+      this.lanIp = (lanIp && lanIp !== '127.0.0.1') ? lanIp : '';
+      if (this.lanIp) {
+        localStorage.setItem('pm.lan_ip', this.lanIp);
+      } else {
+        localStorage.removeItem('pm.lan_ip');
       }
-      this._updateAddonModalUrls();
+      this._updateAddonModalUrls?.();
     } catch (e) {
       // Non-fatal — never tied to bot session.
     }
@@ -2254,8 +2262,7 @@ class PencariMovieApp {
         // UI forever (observed: an endless "Provisioning guest bot..." spinner).
         this._provisionPollCount = (this._provisionPollCount || 0) + 1;
         this.provisionError = 'Provisioning guest bot...';
-        const loadText = document.querySelector('.loading-screen__text');
-        if (loadText) loadText.textContent = 'Provisioning guest bot...';
+        this._showLoadingScreen('Provisioning guest bot...');
 
         if (this._provisionPollCount > 20) {
           // ~50s of polling with no session — stop and surface the gate.
@@ -2276,8 +2283,7 @@ class PencariMovieApp {
         }, 2500);
       } else if (data && data.ok === 1) {
         // No session found and not currently provisioning — attempt 1-click automatic guest bot provisioning on the fly
-        const loadText = document.querySelector('.loading-screen__text');
-        if (loadText) loadText.textContent = 'Provisioning guest bot...';
+        this._showLoadingScreen('Provisioning guest bot...');
 
         // Pre-flight clock check: a skewed clock makes every MTProto handshake
         // fail with a confusing "message ID too new/old" error. Detect it now
@@ -3307,6 +3313,18 @@ class PencariMovieApp {
     if (el) el.classList.toggle('hidden', !show);
   }
 
+  /** Show the full-page loading screen shown during session check / guest bot provisioning */
+  _showLoadingScreen(text = 'Provisioning guest bot...') {
+    const el = this.$('#loadingScreen');
+    if (el) {
+      el.classList.remove('hidden');
+      el.setAttribute('aria-hidden', 'false');
+      el.style.display = '';
+      const textEl = el.querySelector('.loading-screen__text');
+      if (textEl) textEl.textContent = text;
+    }
+  }
+
   /** Hide the full-page loading screen shown during session check */
   _hideLoadingScreen() {
     const el = this.$('#loadingScreen');
@@ -4080,10 +4098,10 @@ class PencariMovieApp {
       effectiveParams.country = this.country;
     }
 
-    // 1. Direct browser call to WordPress admin-ajax (no local device DNS/cURL dependency)
+    // 1. Direct browser call to WordPress REST API (no local device DNS/cURL dependency)
     try {
-      const directUrl = new URL(this.wpAjaxUrl || 'https://pencarimovie.com/wp-admin/admin-ajax.php');
-      directUrl.searchParams.set('action', `stream_${action}`);
+      const route = action.replace(/_/g, '-');
+      const directUrl = new URL(`${this.wpApiBase || 'https://pencarimovie.com/wp-json/pencarimovie-server/v1'}/${route}`);
       Object.entries(effectiveParams).forEach(([key, value]) => {
         if (value !== undefined && value !== null && value !== '') {
           directUrl.searchParams.set(key, value);
@@ -4095,7 +4113,7 @@ class PencariMovieApp {
       try {
         const resp = await fetch(directUrl.toString(), {
           headers: {
-            'X-Requested-With': 'XMLHttpRequest',
+            'Accept': 'application/json',
             'X-App-Version': this.version || '2.0.0'
           },
           signal: ctrl.signal
