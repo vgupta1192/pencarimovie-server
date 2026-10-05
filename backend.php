@@ -167,7 +167,7 @@ define('FD_WP_AJAX_URL', 'https://pencarimovie.com/wp-admin/admin-ajax.php');
 define('FD_WP_FALLBACK_HOST', 'telegra.my');
 define('FD_WP_API_BASE_FALLBACK', 'https://' . FD_WP_FALLBACK_HOST . '/wp-json/pencarimovie-server/v1');
 define('FD_WP_AJAX_URL_FALLBACK', 'https://' . FD_WP_FALLBACK_HOST . '/wp-admin/admin-ajax.php');
-define('FD_APP_VERSION', is_file(__DIR__ . '/.release-tag') ? ltrim(trim((string) file_get_contents(__DIR__ . '/.release-tag')), 'v') : '2.2.7');
+define('FD_APP_VERSION', is_file(__DIR__ . '/.release-tag') ? ltrim(trim((string) file_get_contents(__DIR__ . '/.release-tag')), 'v') : '2.7.7');
 define('FD_WP_VERSION_URL', FD_WP_API_BASE . '/version');
 define('FD_API_SECRET_PATH', fd_storage_path('storage/api_secret.key'));
 define('FD_BOT_ID_CACHE_PATH', fd_storage_path('storage/bot_id.txt'));
@@ -4262,6 +4262,19 @@ function fd_ensure_ipc_worker(string $sessionDir): bool
         return false;
     }
 
+    // FrankenPHP 1.13.0+ compatibility: ensure entry.php handles os.Args[0] (frankenphp) being prepended to argv
+    $entryCode = @file_get_contents($entry);
+    if ($entryCode !== false && !str_contains($entryCode, 'str_ends_with($arguments[0]')) {
+        $patched = str_replace(
+            '$arguments = \array_slice($GLOBALS[\'argv\'], 1);',
+            '$arguments = \array_slice($GLOBALS[\'argv\'], 1);' . "\n" . '            if (isset($arguments[0]) && (\str_ends_with($arguments[0], \'.php\') || (isset($arguments[1]) && \in_array($arguments[1], [\'madeline-ipc\', \'madeline-worker\'], true)))) {' . "\n" . '                \array_shift($arguments);' . "\n" . '            }',
+            $entryCode
+        );
+        if ($patched !== $entryCode) {
+            @file_put_contents($entry, $patched);
+        }
+    }
+
     $startupId = random_int(100000000, 2000000000);
     $sessionDir = str_replace('/', DIRECTORY_SEPARATOR, $sessionDir);
 
@@ -5225,7 +5238,13 @@ function fd_check_version(): array
         if (is_file($cacheFile)) {
             $cached = @json_decode((string) @file_get_contents($cacheFile), true);
             if (is_array($cached) && !empty($cached['time']) && (time() - $cached['time'] < 3600)) {
-                $fd_version_state = $cached['data'] ?? [];
+                // If disk cache was saved for a different app version, invalidate it
+                if (!empty($cached['result']['current_version']) && $cached['result']['current_version'] !== $current) {
+                    @unlink($cacheFile);
+                    $fd_version_state = [];
+                } else {
+                    $fd_version_state = $cached['data'] ?? [];
+                }
             }
         }
     }
@@ -5236,7 +5255,9 @@ function fd_check_version(): array
         if (!empty($response['ok'])) {
             $minVersion = (string) ($response['min_version'] ?? '');
             $updateUrl = (string) ($response['update_url'] ?? '');
-            $updateNeeded = $minVersion !== '' && version_compare($current, $minVersion, '<');
+            $updateNeeded = ($minVersion !== '')
+                ? version_compare($current, $minVersion, '<')
+                : !empty($response['update_required']);
             $fd_version_state['min_version'] = $minVersion;
             $fd_version_state['update_url'] = $updateUrl;
             $fd_version_state['update_required'] = $updateNeeded;
@@ -5269,7 +5290,9 @@ function fd_check_version(): array
 
     $minVersion = (string) ($fd_version_state['min_version'] ?? '');
     $updateUrl = (string) ($fd_version_state['update_url'] ?? '');
-    $updateNeeded = !empty($fd_version_state['update_required']) || ($minVersion !== '' && version_compare($current, $minVersion, '<'));
+    $updateNeeded = ($minVersion !== '')
+        ? version_compare($current, $minVersion, '<')
+        : !empty($fd_version_state['update_required']);
 
     return [
         'ok' => true,
@@ -7639,6 +7662,7 @@ function fd_is_topkeyword_valid(string $keyword): bool
         'nsfw',
         'naked',
         'nude',
+        'melayu',
         'colmek',
         'sange',
         'tetek',
@@ -12071,21 +12095,43 @@ if ($isNuvioRoute) {
         // Check 5-minute stream list cache (per itemId and baseUrl to differentiate tunnel vs local).
         // The auth state is part of the key so an unauthenticated request can never
         // be served a cached authenticated response (and vice versa).
+        $isRefresh = !empty($_GET['refresh']) || !empty($_GET['force']) || !empty($_GET['nocache']) ||
+            (isset($_SERVER['HTTP_CACHE_CONTROL']) && str_contains(strtolower($_SERVER['HTTP_CACHE_CONTROL']), 'no-cache')) ||
+            (isset($_SERVER['HTTP_PRAGMA']) && str_contains(strtolower($_SERVER['HTTP_PRAGMA']), 'no-cache'));
+
         $streamCacheKey = md5($itemId . ':' . $itemType . ':' . $baseUrl . ':' . (fd_is_authenticated() ? 'auth' : 'anon'));
         $streamCacheFile = fd_cache_path('stream_cache_' . $streamCacheKey . '.json');
-        if (is_file($streamCacheFile) && (time() - (int)filemtime($streamCacheFile)) < 300) {
+        if (!$isRefresh && is_file($streamCacheFile) && (time() - (int)filemtime($streamCacheFile)) < 300) {
             $cachedJson = @file_get_contents($streamCacheFile);
             if ($cachedJson) {
                 $cachedData = json_decode($cachedJson, true);
-                if (is_array($cachedData) && isset($cachedData['streams'])) {
-                    fd_log('stremio stream served from cache', [
-                        'itemId' => $itemId,
-                        'streamCount' => count($cachedData['streams']),
-                        'duration_seconds' => round(microtime(true) - $streamStart, 4),
-                    ]);
-                    fd_stremio_json($cachedData, 200, 'max-age=300, public');
+                if (is_array($cachedData) && !empty($cachedData['streams']) && is_array($cachedData['streams'])) {
+                    // Check if cachedData has at least one real playable stream (has url or infoHash).
+                    // Never serve a cached "no stream found" or error/placeholder response.
+                    $hasPlayableInCache = false;
+                    foreach ($cachedData['streams'] as $cs) {
+                        if (is_array($cs) && (!empty($cs['url']) || !empty($cs['infoHash']))) {
+                            $hasPlayableInCache = true;
+                            break;
+                        }
+                    }
+                    if ($hasPlayableInCache) {
+                        fd_log('stremio stream served from cache', [
+                            'itemId' => $itemId,
+                            'streamCount' => count($cachedData['streams']),
+                            'duration_seconds' => round(microtime(true) - $streamStart, 4),
+                        ]);
+                        fd_stremio_json($cachedData, 200, 'max-age=300, public');
+                    } else {
+                        // Cached file has no playable streams (e.g. stale "No streams found" placeholder).
+                        // Purge it so a fresh lookup is executed immediately.
+                        @unlink($streamCacheFile);
+                    }
                 }
             }
+        } elseif ($isRefresh && is_file($streamCacheFile)) {
+            // Client explicitly requested refresh/revalidate: purge existing cache file
+            @unlink($streamCacheFile);
         }
 
         $subtitlesForStream = [];
@@ -12242,6 +12288,23 @@ if ($isNuvioRoute) {
                         $fCaption = (string) ($f['caption'] ?? '');
                         if (!fd_is_series_file($fTitle, $fCaption)) {
                             $filesToStream[] = $f;
+                        }
+                    }
+                }
+
+                // Fallback for Movie requested via post ID (ported from upstream 3871a86):
+                // if stream-files returned 0 items, probe post_files directly for this exact
+                // post ID. Files belong to the already-resolved post, so the local series-file
+                // guard replaces upstream's strict title matcher (kept removed locally).
+                if (empty($filesToStream)) {
+                    $pfRes = fd_fetch_stream_ajax('post_files', ['post_id' => $postId, 'limit' => 100]);
+                    if (is_array($pfRes) && !empty($pfRes['files'])) {
+                        foreach ($pfRes['files'] as $f) {
+                            $fTitle = fd_clean_html_entities((string) ($f['title'] ?? ''));
+                            $fCaption = (string) ($f['caption'] ?? '');
+                            if (!fd_is_series_file($fTitle, $fCaption)) {
+                                $filesToStream[] = $f;
+                            }
                         }
                     }
                 }
@@ -13367,22 +13430,23 @@ if ($isNuvioRoute) {
             }
         }
 
-        // Add sponsored / ad stream link with externalUrl on top if configured and not empty
+        // Check if any real playable stream exists (has url or infoHash)
+        $hasPlayableStreams = false;
+        foreach ($streams as $s) {
+            if (is_array($s) && (!empty($s['url']) || !empty($s['infoHash']))) {
+                $hasPlayableStreams = true;
+                break;
+            }
+        }
+
+        // Sponsor / ad stream details from versionCheck
         $sponsorInfo = $versionCheck['sponsor'] ?? [];
         $adUrl = trim((string) ($sponsorInfo['url'] ?? ''));
         $adName = trim((string) ($sponsorInfo['name'] ?? ''));
         $adDesc = trim((string) ($sponsorInfo['description'] ?? ''));
 
-        if (!empty($streams)) {
-            if ($adUrl !== '') {
-                array_unshift($streams, [
-                    'name' => $adName,
-                    'description' => $adDesc,
-                    'externalUrl' => $adUrl,
-                ]);
-            }
-        } else {
-            // No streams found: check if files existed but were all hidden by user's stream filters
+        if (!$hasPlayableStreams) {
+            // No playable streams found: check if files existed but were all hidden by user's stream filters
             if (!empty($totalFilesBeforeFilter) && $totalFilesBeforeFilter > 0) {
                 $noStreamTitle = '⚠️ Streams Filtered Out';
                 $noStreamDesc = "🔍 {$totalFilesBeforeFilter} stream(s) found on PencariMovie, but hidden by your active filters (Resolution / Codec / Size / Keywords).\n👉 Tap to open settings & adjust filters.";
@@ -13399,12 +13463,28 @@ if ($isNuvioRoute) {
             ];
         }
 
-        // Save to stream cache for 5 minutes
-        if (!empty($streamCacheFile)) {
-            @file_put_contents($streamCacheFile, json_encode(['streams' => $streams], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), LOCK_EX);
+        // ALWAYS add the sponsored message on top if configured (regardless of whether streams were found or empty)
+        if ($adUrl !== '') {
+            array_unshift($streams, [
+                'name' => $adName !== '' ? $adName : 'PencariMovie',
+                'description' => $adDesc !== '' ? $adDesc : 'Join our Telegram channel for updates & requests',
+                'externalUrl' => $adUrl,
+            ]);
         }
 
-        fd_stremio_json(['streams' => $streams]);
+        // Save to stream cache ONLY if real playable streams were found.
+        // NEVER cache "no stream found" so newly indexed files or resolved streams appear immediately.
+        if ($hasPlayableStreams && !empty($streamCacheFile)) {
+            @file_put_contents($streamCacheFile, json_encode(['streams' => $streams], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), LOCK_EX);
+            fd_stremio_json(['streams' => $streams], 200, 'max-age=300, public');
+        } else {
+            // If no playable streams, ensure any existing cache file is deleted
+            if (!empty($streamCacheFile) && is_file($streamCacheFile)) {
+                @unlink($streamCacheFile);
+            }
+            // Send no-cache headers so client/Stremio does not cache empty/no stream response
+            fd_stremio_json(['streams' => $streams], 200, 'no-cache, no-store, must-revalidate');
+        }
     }
 
     // ── Nuvio Subtitles: /subtitles/:type/:id[/:extra].json ──
@@ -15090,6 +15170,8 @@ if (str_starts_with($path, '/api/')) {
                     header('Access-Control-Allow-Methods: GET, HEAD, OPTIONS');
                     header('Access-Control-Expose-Headers: Accept-Ranges, Content-Range, Content-Length, Content-Type');
                     header('Accept-Ranges: bytes');
+                    header('X-Accel-Buffering: no');
+                    header('Incremental: ?1');
                 }
                 fd_log('starting downloadToBrowser', [
                     'file_id' => $fileId,
@@ -15148,7 +15230,41 @@ if (str_starts_with($path, '/api/')) {
                     if ($newFileId !== '' && $newFileId !== $fileId && $downloadAttempt < $maxDownloadAttempts) {
                         $fileId = $newFileId;
                         $fileSize = (int) ($reResolved['file_size'] ?? $fileSize);
+                        if (!empty($reResolved['bot_id']) && (string) $reResolved['bot_id'] !== $botId) {
+                            $botId = (string) $reResolved['bot_id'];
+                            [$retryMadeline] = fd_boot_madeline(null, [], $botId);
+                            if ($retryMadeline) {
+                                $madeline = $retryMadeline;
+                                $isIpcClient = $madeline instanceof \danog\MadelineProto\Ipc\Client;
+                                $abortCallback = $isIpcClient ? null : $abortCallback;
+                            }
+                        }
                         continue;
+                    }
+
+                    // If same bot returned identical or empty file_id, try candidate bots in pool
+                    if (($newFileId === '' || $newFileId === $fileId) && $downloadAttempt < $maxDownloadAttempts) {
+                        $pool = fd_get_bot_pool();
+                        foreach ($pool as $pBot) {
+                            $altBotId = (string) ($pBot['bot_id'] ?? '');
+                            if ($altBotId !== '' && $altBotId !== $botId && fd_has_local_session($altBotId)) {
+                                fd_log('file reference expired, trying alternate bot from pool', ['short_code' => $shortCode, 'alt_bot_id' => $altBotId]);
+                                $altResolved = fd_resolve_shortcode($shortCode, $altBotId, true);
+                                $altFileId = trim((string) ($altResolved['file_id_mt'] ?? $altResolved['file_id'] ?? ''));
+                                if ($altFileId !== '') {
+                                    [$altMadeline] = fd_boot_madeline(null, [], $altBotId);
+                                    if ($altMadeline) {
+                                        $madeline = $altMadeline;
+                                        $botId = $altBotId;
+                                        $fileId = $altFileId;
+                                        $fileSize = (int) ($altResolved['file_size'] ?? $fileSize);
+                                        $isIpcClient = $madeline instanceof \danog\MadelineProto\Ipc\Client;
+                                        $abortCallback = $isIpcClient ? null : $abortCallback;
+                                        continue 2;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -15242,11 +15358,17 @@ if (str_starts_with($path, '/api/')) {
 // If running under the CLI SAPI, handle CLI background commands
 if (PHP_SAPI === 'cli' || PHP_SAPI === 'phpdbg') {
     global $argv;
-    $cliAction = $argv[1] ?? ($_SERVER['argv'][1] ?? '');
+    $cliArgs = $argv ?? ($_SERVER['argv'] ?? []);
+    // Under FrankenPHP 1.13.0+, os.Args[0] (frankenphp) is prepended to argv so $cliArgs[0] is frankenphp
+    // and $cliArgs[1] is the script path. Normalize by stripping the script path if present.
+    if (isset($cliArgs[1]) && str_ends_with($cliArgs[1], '.php')) {
+        $cliArgs = array_values(array_slice($cliArgs, 1));
+    }
+    $cliAction = $cliArgs[1] ?? '';
     if ($cliAction === 'warmup') {
-        $rawCodes = $argv[2] ?? ($_SERVER['argv'][2] ?? '');
-        $cliBotId = $argv[3] ?? ($_SERVER['argv'][3] ?? '');
-        $cliContext = $argv[4] ?? ($_SERVER['argv'][4] ?? '');
+        $rawCodes = $cliArgs[2] ?? '';
+        $cliBotId = $cliArgs[3] ?? '';
+        $cliContext = $cliArgs[4] ?? '';
         $codes = array_values(array_unique(array_filter(preg_split('/[\s,]+/', $rawCodes))));
         if (!empty($codes)) {
             fd_warmup_resolve_batch($codes, $cliBotId, 40, $cliContext);
